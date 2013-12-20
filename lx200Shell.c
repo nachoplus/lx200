@@ -1,0 +1,197 @@
+/*
+    ChibiOS/RT - Copyright (C) 2006,2007,2008,2009,2010,
+                 2011,2012 Giovanni Di Sirio.
+
+    This file is part of ChibiOS/RT.
+
+    ChibiOS/RT is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 3 of the License, or
+    (at your option) any later version.
+
+    ChibiOS/RT is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+/**
+ * @file    lx200Shell.c
+ * @brief   Simple CLI lx200Shell code.
+ *
+ * @addtogroup lx200Shell
+ * @{
+ */
+
+#include <string.h>
+#include "ch.h"
+#include "lx200Shell.h"
+#include "chprintf.h"
+
+/**
+ * @brief   lx200Shell termination event source.
+ */
+EventSource lx200Shell_terminated;
+
+
+
+static bool_t cmdexec(const lx200ShellCommand *scp, BaseSequentialStream *chp,
+                      char *name, int argc, char *args) 
+{
+  while (scp->sc_name != NULL) {
+    if (strcmp(scp->sc_name, name) == 0) {
+      scp->sc_function(chp, argc, args);
+      return FALSE;
+    }
+    scp++;
+  }
+  return TRUE;
+}
+
+/**
+ * @brief   lx200Shell thread function.
+ *
+ * @param[in] p         pointer to a @p BaseSequentialStream object
+ * @return              Termination reason.
+ * @retval RDY_OK       terminated by command.
+ * @retval RDY_RESET    terminated by reset condition on the I/O channel.
+ */
+static msg_t lx200Shell_thread(void *p) {
+  int n;
+  msg_t msg = RDY_OK;
+  BaseSequentialStream *chp = ((lx200ShellConfig *)p)->sc_channel;
+  const lx200ShellCommand *scp = ((lx200ShellConfig *)p)->sc_commands;
+  const lx200ShellCommand *scp0;
+  char cmd[lx200Shell_MAX_LINE_LENGTH], line[lx200Shell_MAX_LINE_LENGTH];
+  char args[lx200Shell_MAX_LINE_LENGTH];
+
+  chRegSetThreadName("lx200Shell");
+  //chprintf(chp, "\r\nChibiOS/RT lx200Shell\r\n");
+  while (TRUE) {
+    //chprintf(chp, "#> ");
+    if (lx200ShellGetLine(chp, line, sizeof(line))) {
+      chprintf(chp, "\r\nlogout");
+      break;
+    }
+    //chprintf(chp, "line: %s \n", line);
+	scp0=scp;
+	cmd[0]='\0';              
+	while (scp->sc_name != NULL) {
+
+	//chprintf(chp, "cmd check: %s vs %s \n",line,scp->sc_name);
+		if (strncmp(line,scp->sc_name,strlen(scp->sc_name)) == 0) {
+			strcpy(cmd,scp->sc_name);
+	//		chprintf(chp, "cmd reconized: %s. \n", cmd);
+			break;
+		} 
+		scp++;	
+	}
+ 	scp=scp0;
+	n = 0;
+        //chprintf(chp, "line: %s \n", line);
+	//chprintf(chp, "len: %u %u?\n", strlen(line),strlen(cmd));
+	if ( (strlen(cmd)!=0)  && (strlen(line) != strlen(cmd)) ) {
+		strcpy(args,&line[strlen(cmd)]);
+		//chprintf(chp, "arg: %s \n", args);
+		n=1;
+	}
+
+    if (strlen(cmd)!=0) {
+      //chprintf(chp, "execmd: %s \n", cmd);
+      if ( cmdexec(scp, chp, cmd, n, args) ) {
+        //chprintf(chp, "%s", cmd);
+        //chprintf(chp, "0\r\n");
+      }
+    }
+  }
+  /* Atomically broadcasting the event source and terminating the thread,
+     there is not a chSysUnlock() because the thread terminates upon return.*/
+  chSysLock();
+  chEvtBroadcastI(&lx200Shell_terminated);
+  chThdExitS(msg);
+  return 0; /* Never executed.*/
+}
+
+/**
+ * @brief   lx200Shell manager initialization.
+ */
+void lx200ShellInit(void) {
+
+  chEvtInit(&lx200Shell_terminated);
+}
+
+/**
+ * @brief   Spawns a new lx200Shell.
+ * @pre     @p CH_USE_MALLOC_HEAP and @p CH_USE_DYNAMIC must be enabled.
+ *
+ * @param[in] scp       pointer to a @p lx200ShellConfig object
+ * @param[in] size      size of the lx200Shell working area to be allocated
+ * @param[in] prio      priority level for the new lx200Shell
+ * @return              A pointer to the lx200Shell thread.
+ * @retval NULL         thread creation failed because memory allocation.
+ */
+#if CH_USE_HEAP && CH_USE_DYNAMIC
+Thread *lx200ShellCreate(const lx200ShellConfig *scp, size_t size, tprio_t prio) {
+
+  return chThdCreateFromHeap(NULL, size, prio, lx200Shell_thread, (void *)scp);
+}
+#endif
+
+/**
+ * @brief   Create statically allocated lx200Shell thread.
+ *
+ * @param[in] scp       pointer to a @p lx200ShellConfig object
+ * @param[in] wsp       pointer to a working area dedicated to the lx200Shell thread stack
+ * @param[in] size      size of the lx200Shell working area
+ * @param[in] prio      priority level for the new lx200Shell
+ * @return              A pointer to the lx200Shell thread.
+ */
+Thread *lx200ShellCreateStatic(const lx200ShellConfig *scp, void *wsp,
+                          size_t size, tprio_t prio) {
+
+  return chThdCreateStatic(wsp, size, prio, lx200Shell_thread, (void *)scp);
+}
+
+/**
+ * @brief   Reads a whole line from the input channel.
+ *
+ * @param[in] chp       pointer to a @p BaseSequentialStream object
+ * @param[in] line      pointer to the line buffer
+ * @param[in] size      buffer maximum length
+ * @return              The operation status.
+ * @retval TRUE         the channel was reset or CTRL-D pressed.
+ * @retval FALSE        operation successful.
+ */
+bool_t lx200ShellGetLine(BaseSequentialStream *chp, char *line, unsigned size) {
+  char *p = line;
+
+  while (TRUE) {
+    char c;
+
+    if (chSequentialStreamRead(chp, (uint8_t *)&c, 1) == 0)
+      return TRUE;
+    /* ACK special case */
+    if (c == 0x06) {
+      chprintf(chp, "\n");
+      *p = 0;
+      return FALSE;
+    }
+
+    if (c == '#' || c == '\r') {
+      //chprintf(chp, "\n");
+      *p = 0;
+      return FALSE;
+    }
+    if (c < 0x20)
+      continue;
+    if (p < line + size - 1) {
+      //chSequentialStreamPut(chp, c); /*Echo*/
+      *p++ = (char)c;
+    }
+  }
+}
+
+/** @} */
